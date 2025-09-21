@@ -8,6 +8,14 @@ Captive portal detector and browser opener for macOS.
 
 ## Installation
 
+### Homebrew
+
+```bash
+brew install kazu728/tap/reauthfi
+```
+
+### Cargo
+
 Install from crates.io:
 
 ```bash
