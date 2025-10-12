@@ -1,6 +1,6 @@
 {
   "name": "reauthfi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "macOS Captive Portal auto-detection and opener CLI tool",
   "main": "index.js",
   "bin": "bin.js",
@@ -39,7 +39,8 @@
     "index.js",
     "index.d.ts",
     "bin.js",
-    "reauthfi.darwin-arm64.node"
+    "reauthfi.darwin-arm64.node",
+    "README.md"
   ],
   "engines": {
     "node": ">= 22"

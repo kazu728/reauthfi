@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 clap.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
-reauthfi-core = { path = "../../core" }
+reauthfi-core = { path = "../../core", version = "0.1.2" }
 
 [build-dependencies]
 napi-build.workspace = true

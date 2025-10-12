@@ -14,16 +14,12 @@ use colored::Colorize;
 use regex::Regex;
 use reqwest::blocking::Client;
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("reauthfi currently supports only macOS");
-
 #[derive(Debug)]
 pub enum ReauthfiError {
     Network(reqwest::Error),
     Io(std::io::Error),
     NotFound,
     CommandFailed(String),
-    #[cfg(not(target_os = "macos"))]
     UnsupportedPlatform,
 }
 
@@ -41,7 +37,6 @@ impl fmt::Display for ReauthfiError {
             ReauthfiError::Io(e) => write!(f, "IO error: {}", e),
             ReauthfiError::NotFound => write!(f, "Captive portal not found"),
             ReauthfiError::CommandFailed(msg) => write!(f, "Command failed: {}", msg),
-            #[cfg(not(target_os = "macos"))]
             ReauthfiError::UnsupportedPlatform => write!(f, "Unsupported platform"),
         }
     }
@@ -64,16 +59,26 @@ impl From<std::io::Error> for ReauthfiError {
 #[derive(Debug, Clone)]
 pub enum Platform {
     MacOS,
+    Unsupported,
 }
 
 impl Platform {
     pub fn detect() -> Self {
-        Platform::MacOS
+        #[cfg(target_os = "macos")]
+        {
+            Platform::MacOS
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Platform::Unsupported
+        }
     }
 
     pub fn detection_endpoints(&self) -> &'static [DetectionEndpoint] {
         match self {
             Platform::MacOS => MACOS_DETECTION_ENDPOINTS,
+            Platform::Unsupported => &[],
         }
     }
 }
@@ -110,11 +115,14 @@ const MACOS_GATEWAY_REGEX: &str = r"gateway:\s+(\d+\.\d+\.\d+\.\d+)";
 const MACOS_GATEWAY_ENDPOINTS: &[&str] = &["/"];
 
 impl PlatformConfig {
-    pub fn for_platform(_platform: &Platform) -> Self {
-        PlatformConfig {
-            gateway_command: MACOS_GATEWAY_COMMAND,
-            gateway_regex: MACOS_GATEWAY_REGEX,
-            gateway_endpoints: MACOS_GATEWAY_ENDPOINTS,
+    pub fn for_platform(platform: &Platform) -> Result<Self, ReauthfiError> {
+        match platform {
+            Platform::MacOS => Ok(PlatformConfig {
+                gateway_command: MACOS_GATEWAY_COMMAND,
+                gateway_regex: MACOS_GATEWAY_REGEX,
+                gateway_endpoints: MACOS_GATEWAY_ENDPOINTS,
+            }),
+            Platform::Unsupported => Err(ReauthfiError::UnsupportedPlatform),
         }
     }
 }
@@ -279,6 +287,7 @@ impl PortalOpenerService {
 
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = url;
             Err(ReauthfiError::UnsupportedPlatform)
         }
     }
@@ -426,7 +435,7 @@ pub enum ExecutionStatus {
 
 pub fn run(options: &Options) -> Result<ExecutionStatus, ReauthfiError> {
     let platform = Platform::detect();
-    let config = PlatformConfig::for_platform(&platform);
+    let config = PlatformConfig::for_platform(&platform)?;
 
     let client = match build_client(options.timeout) {
         Ok(client) => client,

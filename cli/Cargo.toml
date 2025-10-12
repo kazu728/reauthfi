@@ -6,6 +6,7 @@ authors.workspace = true
 description.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "reauthfi"
@@ -14,4 +15,4 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 colored.workspace = true
-reauthfi-core = { path = "../core" }
+reauthfi-core = { path = "../core", version = "0.1.2" }
