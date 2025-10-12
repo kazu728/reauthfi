@@ -1,0 +1,52 @@
+name: npm publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Ensure tag matches package version
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          PKG_VERSION=$(node -p "require('./bindings/node/package.json').version")
+          if [[ "v${PKG_VERSION}" != "${TAG_NAME}" ]]; then
+            echo "Release tag ${TAG_NAME} does not match package version ${PKG_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Build and verify bundle
+        run: |
+          cargo check
+          pushd bindings/node >/dev/null
+          npm ci
+          npm run build
+          npm pack --dry-run
+          popd >/dev/null
+
+      - name: Publish to npm
+        run: npm publish --access public
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

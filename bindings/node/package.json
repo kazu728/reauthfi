@@ -1,0 +1,47 @@
+{
+  "name": "reauthfi",
+  "version": "0.1.1",
+  "description": "macOS Captive Portal auto-detection and opener CLI tool",
+  "main": "index.js",
+  "bin": "bin.js",
+  "repository": "https://github.com/kazu728/reauthfi",
+  "license": "MIT",
+  "author": "kazu728",
+  "keywords": [
+    "captive-portal",
+    "macos",
+    "cli",
+    "wifi",
+    "network"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "napi": {
+    "binaryName": "reauthfi",
+    "targets": [
+      "aarch64-apple-darwin"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0-alpha.64"
+  },
+  "scripts": {
+    "build": "napi build --release --target aarch64-apple-darwin && cp -f ./reauthfi.node ./reauthfi.darwin-arm64.node",
+    "build:debug": "napi build --target aarch64-apple-darwin && cp -f ./reauthfi.node ./reauthfi.darwin-arm64.node",
+    "prepublishOnly": "npm run build",
+    "version": "napi version"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bin.js",
+    "reauthfi.darwin-arm64.node"
+  ],
+  "engines": {
+    "node": ">= 22"
+  }
+}
