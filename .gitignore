@@ -1,1 +1,5 @@
 target
+node_modules
+bindings/node/node_modules
+bindings/node/reauthfi.node
+bindings/node/reauthfi.darwin-arm64.node
