@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use colored::Colorize;
-use reauthfi_core::{run, ExecutionStatus, Options};
+use reauthfi::{run, ExecutionStatus, Options};
 
 #[derive(Parser)]
 #[command(name = "reauthfi")]
@@ -18,7 +18,7 @@ struct CliArgs {
     #[arg(long, help = "Prioritize gateway direct check")]
     gateway: bool,
 
-    #[arg(long, default_value_t = 10, help = "Request timeout in seconds")]
+    #[arg(long, default_value_t = 5, help = "Request timeout in seconds")]
     timeout: u64,
 }
 
@@ -32,7 +32,8 @@ fn main() -> ExitCode {
     };
 
     match run(&options) {
-        Ok(ExecutionStatus::Completed) | Ok(ExecutionStatus::NetworkNotReady) => ExitCode::SUCCESS,
+        Ok(ExecutionStatus::Completed) => ExitCode::SUCCESS,
+        Ok(ExecutionStatus::NetworkNotReady) => ExitCode::from(2),
         Err(err) => {
             eprintln!("{} {}", "❌".red().bold(), err);
             ExitCode::FAILURE

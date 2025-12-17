@@ -1,15 +1,45 @@
-const { platform, arch } = process;
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
 
-if (platform !== 'darwin' || arch !== 'arm64') {
-  throw new Error('reauthfi npm package supports only macOS arm64 (Apple Silicon) environments.');
+function assertSupportedPlatform() {
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+    throw new Error(`Unsupported platform: ${process.platform} ${process.arch} (macOS arm64 required)`);
+  }
 }
 
-let nativeBinding;
-try {
-  nativeBinding = require('./reauthfi.darwin-arm64.node');
-} catch (err) {
-  throw new Error('Failed to load native binding. Reinstall the package or run `npm run build`.', { cause: err });
+function resolveBinary() {
+  if (process.env.REAUTHFI_BINARY && fs.existsSync(process.env.REAUTHFI_BINARY)) {
+    return process.env.REAUTHFI_BINARY;
+  }
+
+  const bundled = path.join(__dirname, 'reauthfi');
+  if (fs.existsSync(bundled)) {
+    return bundled;
+  }
+
+  return 'reauthfi';
 }
 
-module.exports = nativeBinding;
-module.exports.run = nativeBinding.run;
+function run(args = []) {
+  assertSupportedPlatform();
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(resolveBinary(), args, {
+      stdio: 'inherit',
+    });
+
+    child.on('error', (err) => reject(err));
+    child.on('exit', (code, signal) => {
+      if (code === 0) {
+        resolve();
+      } else if (signal) {
+        reject(new Error(`reauthfi terminated by signal: ${signal}`));
+      } else {
+        reject(new Error(`reauthfi exited with code ${code}`));
+      }
+    });
+  });
+}
+
+module.exports = { run };
