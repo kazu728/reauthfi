@@ -40,7 +40,7 @@ Options:
 --verbose        Show detailed detection logs
 --no-open        Print portal URL only (do not open browser)
 --gateway        Prioritize gateway-first detection
---timeout <sec>  Request timeout in seconds (default: 10)
+--timeout <sec>  Request timeout in seconds (default: 5)
 ```
 
 Expected output:

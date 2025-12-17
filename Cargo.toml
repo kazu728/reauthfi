@@ -1,25 +1,16 @@
-[workspace]
-members = [
-    "core",
-    "cli",
-    "bindings/node"
-]
-resolver = "2"
-default-members = ["cli"]
-
-[workspace.package]
+[package]
+name = "reauthfi"
 version = "0.1.2"
 edition = "2021"
 authors = ["kazu728"]
 description = "macOS Captive Portal auto-detection and opener CLI tool"
 license = "MIT"
 repository = "https://github.com/kazu728/reauthfi"
+readme = "README.md"
 
-[workspace.dependencies]
+[dependencies]
 reqwest = { version = "0.11", features = ["blocking"] }
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 colored = "2"
-napi = "3"
-napi-derive = "3"
-napi-build = "2"
+ctrlc = "3"

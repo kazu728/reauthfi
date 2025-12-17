@@ -4,6 +4,10 @@ on:
   release:
     types: [published]
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   publish:
     runs-on: macos-latest
@@ -19,7 +23,7 @@ jobs:
           node-version: 'lts/*'
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
-          cache-dependency-path: bindings/node/package-lock.json
+          cache-dependency-path: bindings/node/package.json
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -36,12 +40,13 @@ jobs:
             exit 1
           fi
 
-      - name: Build and verify bundle
+      - name: Build CLI binary
+        run: cargo build --locked --release --target aarch64-apple-darwin
+
+      - name: Stage npm bundle and dry-run pack
         run: |
-          cargo check
+          install -m 0755 target/aarch64-apple-darwin/release/reauthfi bindings/node/reauthfi
           pushd bindings/node >/dev/null
-          npm ci
-          npm run build
           npm pack --dry-run
           popd >/dev/null
 

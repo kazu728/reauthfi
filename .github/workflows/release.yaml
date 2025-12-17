@@ -1,32 +1,34 @@
-name: Release
+name: release
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
+  workflow_dispatch:
 
 jobs:
-  build:
-    permissions:
-      contents: write
+  build-npm-binary:
+    name: Build npm bundle (no publish)
     runs-on: macos-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rs/toolchain@v1
         with:
-          targets: aarch64-apple-darwin
-
-      - name: Build binary
+          toolchain: stable
+          override: true
+      - name: Add macOS arm64 target
+        run: rustup target add aarch64-apple-darwin
+      - name: Build CLI (release)
         run: cargo build --release --target aarch64-apple-darwin
-
-      - name: Archive binary
+      - name: Place binary for npm package
         run: |
-          cd target/aarch64-apple-darwin/release
-          tar czf ../../../reauthfi-aarch64-apple-darwin.tar.gz reauthfi
-
-      - uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+          cp target/aarch64-apple-darwin/release/reauthfi bindings/node/reauthfi
+          chmod +x bindings/node/reauthfi
+      - name: npm pack (no publish)
+        working-directory: bindings/node
+        run: npm pack
+      - name: Upload npm tarball
+        uses: actions/upload-artifact@v4
         with:
-          draft: true
-          files: reauthfi-aarch64-apple-darwin.*
+          name: npm-package
+          path: bindings/node/*.tgz
