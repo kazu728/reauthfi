@@ -48,7 +48,7 @@ Programmatic example:
 ```ts
 import { run } from "reauthfi";
 
-await run(["--no-open", "--verbose"]);
+await run([]);
 ```
 
 On unsupported platforms (non-macOS or non-arm64) the module throws an

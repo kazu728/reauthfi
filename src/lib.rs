@@ -1,6 +1,3 @@
-mod strategies;
-mod wifi_reset;
-
 use std::error::Error;
 use std::fmt;
 use std::process::Command;
@@ -12,8 +9,6 @@ use std::time::Duration;
 use colored::Colorize;
 use regex::Regex;
 use reqwest::blocking::{Client, Response};
-use strategies::{DetectionContext, DetectionStrategy, GatewayDetection, StandardUrlDetection};
-use wifi_reset::WifiController;
 
 #[derive(Debug)]
 pub enum ReauthfiError {
@@ -50,15 +45,6 @@ impl From<std::io::Error> for ReauthfiError {
         ReauthfiError::Io(err)
     }
 }
-
-#[derive(Copy, Clone)]
-pub enum StrategyKind {
-    Gateway,
-    StandardUrl,
-}
-
-pub const GATEWAY_PRIORITY: [StrategyKind; 2] = [StrategyKind::Gateway, StrategyKind::StandardUrl];
-pub const STANDARD_PRIORITY: [StrategyKind; 2] = [StrategyKind::StandardUrl, StrategyKind::Gateway];
 
 #[derive(Debug, Clone)]
 pub struct DetectionEndpoint {
@@ -110,22 +96,6 @@ fn detection_config() -> Result<&'static DetectionConfig, ReauthfiError> {
     #[cfg(not(target_os = "macos"))]
     {
         Err(ReauthfiError::UnsupportedPlatform)
-    }
-}
-
-/// Shared cancellation flag checked by worker threads to allow Ctrl+C to abort quickly.
-#[derive(Clone, Default)]
-pub struct CancelFlag {
-    inner: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl CancelFlag {
-    pub fn is_set(&self) -> bool {
-        self.inner.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub fn set(&self) {
-        self.inner.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -262,7 +232,63 @@ impl PortalOpener for MacPortalOpener {
     }
 }
 
-pub fn print_network_not_ready(verbose: bool, detail: Option<&dyn fmt::Display>) {
+pub struct WifiController;
+
+impl WifiController {
+    pub fn wifi_device() -> Result<String, ReauthfiError> {
+        let output = Command::new("networksetup")
+            .arg("-listallhardwareports")
+            .output()
+            .map_err(ReauthfiError::from)?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let re_block = Regex::new(r"(?s)Hardware Port:\s*(Wi-Fi|AirPort).*?Device:\s*([^\s]+)")
+            .map_err(|_| ReauthfiError::NotFound)?;
+
+        re_block
+            .captures(&stdout)
+            .and_then(|caps| caps.get(2).map(|m| m.as_str().to_string()))
+            .ok_or(ReauthfiError::NotFound)
+    }
+
+    pub fn reset_wifi(device: &str) -> Result<(), ReauthfiError> {
+        Command::new("networksetup")
+            .args(["-setairportpower", device, "off"])
+            .status()
+            .map_err(ReauthfiError::from)
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(ReauthfiError::CommandFailed(format!(
+                        "setairportpower off failed ({})",
+                        status
+                    )))
+                }
+            })?;
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        Command::new("networksetup")
+            .args(["-setairportpower", device, "on"])
+            .status()
+            .map_err(ReauthfiError::from)
+            .and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(ReauthfiError::CommandFailed(format!(
+                        "setairportpower on failed ({})",
+                        status
+                    )))
+                }
+            })?;
+
+        Ok(())
+    }
+}
+
+pub fn print_network_not_ready(detail: Option<&dyn fmt::Display>) {
     println!(
         "{} Network not ready - this may be a first-time Wi-Fi connection",
         "❌".red().bold()
@@ -272,28 +298,194 @@ pub fn print_network_not_ready(verbose: bool, detail: Option<&dyn fmt::Display>)
 
     if let Some(detail) = detail {
         println!("  Detail: {}", detail);
-    } else if verbose {
-        println!("  Detail: none");
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Options {
-    pub verbose: bool,
-    pub no_open: bool,
-    pub gateway: bool,
     pub timeout: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self {
-            verbose: false,
-            no_open: false,
-            gateway: false,
-            timeout: 5,
+        Self { timeout: 5 }
+    }
+}
+
+pub struct DetectionContext<'a> {
+    pub config: &'a DetectionConfig,
+    pub net: Arc<dyn NetworkClient>,
+    pub commands: &'a dyn CommandRunner,
+    pub options: &'a Options,
+}
+
+#[derive(Debug, Clone)]
+struct DetectionTarget {
+    name: String,
+    url: String,
+    expected_status: Option<u16>,
+    allow_meta_refresh: bool,
+}
+
+#[derive(Debug, Clone)]
+enum Outcome {
+    Portal(String),
+    ExpectedOk,
+    Mismatch(u16),
+    Issue(String),
+}
+
+fn classify_parts(
+    target: &DetectionTarget,
+    status_code: u16,
+    location: Option<String>,
+    body: Option<String>,
+) -> Outcome {
+    if let Some(portal_url) = location {
+        return Outcome::Portal(portal_url);
+    }
+
+    if let Some(expected) = target.expected_status {
+        if status_code == expected {
+            return Outcome::ExpectedOk;
         }
     }
+
+    if let Some(body) = body {
+        if target.allow_meta_refresh {
+            if let Some(url) = extract_meta_refresh(&body) {
+                return Outcome::Portal(url);
+            }
+        }
+
+        if target.expected_status.is_none() && body.to_ascii_lowercase().contains("success") {
+            return Outcome::ExpectedOk;
+        }
+    }
+
+    Outcome::Mismatch(status_code)
+}
+
+fn classify_response(target: &DetectionTarget, response: Response) -> Outcome {
+    let location = redirect_location_url(&response);
+    let status = response.status();
+    let status_code = status.as_u16();
+    let should_parse_body =
+        status.is_success() && (target.allow_meta_refresh || target.expected_status.is_none());
+
+    if should_parse_body {
+        match response.text() {
+            Ok(body) => classify_parts(target, status_code, location, Some(body)),
+            Err(_) => Outcome::Issue(format!("{}: failed to read body", target.name)),
+        }
+    } else {
+        classify_parts(target, status_code, location, None)
+    }
+}
+
+fn error_reason(name: &str, err: &reqwest::Error, timeout: Duration) -> String {
+    if err.is_timeout() {
+        format!("{}: timeout ({}s)", name, timeout.as_secs())
+    } else if err.is_connect() {
+        format!("{}: connect error", name)
+    } else {
+        format!("{}: error {}", name, err)
+    }
+}
+
+fn run_detection(targets: &[DetectionTarget], ctx: &DetectionContext) -> DetectionResult {
+    let mut errors: Vec<String> = Vec::new();
+    let mut saw_expected_ok = false;
+
+    for target in targets {
+        let request_timeout = Duration::from_secs(ctx.options.timeout);
+
+        let outcome = match ctx.net.get(&target.url, request_timeout) {
+            Ok(response) => classify_response(target, response),
+            Err(e) => Outcome::Issue(error_reason(&target.name, &e, request_timeout)),
+        };
+
+        match outcome {
+            Outcome::Portal(url) => {
+                println!("    {} {} redirect detected", "✓".green(), target.name);
+                return DetectionResult::PortalFound(url);
+            }
+            Outcome::Issue(msg) => {
+                if target.allow_meta_refresh {
+                    println!(
+                        "    {} {} unreachable (ignored)",
+                        "⚠️".yellow(),
+                        target.name
+                    );
+                } else {
+                    println!("    {} {} failed", "✗".red(), target.name);
+                }
+                errors.push(msg);
+            }
+            Outcome::Mismatch(status) => {
+                errors.push(format!("{}: status {}", target.name, status));
+            }
+            Outcome::ExpectedOk => {
+                saw_expected_ok = true;
+            }
+        }
+    }
+
+    if saw_expected_ok {
+        DetectionResult::NoPortalDetected
+    } else if !errors.is_empty() {
+        DetectionResult::NetworkIssues(errors)
+    } else {
+        DetectionResult::NoPortalDetected
+    }
+}
+
+pub fn detect_standard(ctx: &DetectionContext) -> DetectionResult {
+    let endpoints = ctx.config.detection_endpoints;
+    if endpoints.is_empty() {
+        return DetectionResult::NoPortalDetected;
+    }
+
+    println!(
+        "  {} Checking captive portal endpoints ({} total)...",
+        "•".yellow(),
+        endpoints.len()
+    );
+
+    let targets: Vec<DetectionTarget> = endpoints
+        .iter()
+        .map(|endpoint| DetectionTarget {
+            name: endpoint.name.to_string(),
+            url: endpoint.url.to_string(),
+            expected_status: endpoint.expected_status,
+            allow_meta_refresh: false,
+        })
+        .collect();
+
+    run_detection(&targets, ctx)
+}
+
+pub fn detect_gateway(ctx: &DetectionContext) -> DetectionResult {
+    let gateway_ip = match get_gateway_ip(ctx.config, ctx.commands) {
+        Ok(ip) => ip,
+        Err(_) => return DetectionResult::NetworkIssues(vec!["gateway_ip".to_string()]),
+    };
+
+    println!("  {} Checking gateway endpoints...", "•".yellow());
+
+    let targets: Vec<DetectionTarget> = ctx
+        .config
+        .gateway_endpoints
+        .iter()
+        .map(|endpoint| DetectionTarget {
+            name: format!("Gateway{}", endpoint),
+            url: format!("http://{}{}", gateway_ip, endpoint),
+            expected_status: None,
+            allow_meta_refresh: true,
+        })
+        .collect();
+
+    run_detection(&targets, ctx)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,37 +498,31 @@ struct Detector<'a> {
     config: &'a DetectionConfig,
     commands: &'a dyn CommandRunner,
     options: &'a Options,
-    cancel_flag: &'a CancelFlag,
     opener: &'a dyn PortalOpener,
 }
 
 impl<'a> Detector<'a> {
-    fn run(&self, strategies: &[StrategyKind]) -> Result<ExecutionStatus, ReauthfiError> {
-        let (status, errors) = self.detect_once(strategies)?;
+    fn run(&self) -> Result<ExecutionStatus, ReauthfiError> {
+        let (status, errors) = self.detect_once()?;
         match status {
             ExecutionStatus::Completed => Ok(ExecutionStatus::Completed),
-            ExecutionStatus::NetworkNotReady => self.retry_with_wifi_reset(strategies, errors),
+            ExecutionStatus::NetworkNotReady => self.retry_with_wifi_reset(errors),
         }
     }
 
-    fn detect_once(
-        &self,
-        strategies: &[StrategyKind],
-    ) -> Result<(ExecutionStatus, Vec<String>), ReauthfiError> {
+    fn detect_once(&self) -> Result<(ExecutionStatus, Vec<String>), ReauthfiError> {
         let net = Arc::new(HttpClient::new(self.options.timeout)?);
         let ctx = DetectionContext {
             config: self.config,
             net: net.clone(),
             commands: self.commands,
             options: self.options,
-            cancel_flag: self.cancel_flag,
         };
-        Ok(detect_portal(strategies, &ctx, self.options, self.opener))
+        Ok(detect_portal(&ctx, self.opener))
     }
 
     fn retry_with_wifi_reset(
         &self,
-        strategies: &[StrategyKind],
         first_errors: Vec<String>,
     ) -> Result<ExecutionStatus, ReauthfiError> {
         #[cfg(target_os = "macos")]
@@ -350,101 +536,75 @@ impl<'a> Detector<'a> {
                     );
                     if WifiController::reset_wifi(&dev).is_ok() {
                         // Allow the interface time to come back up after toggle.
-                        println!(
-                            "{} Waiting 10s for Wi-Fi to reconnect...",
-                            "⏳".yellow()
-                        );
+                        println!("{} Waiting 10s for Wi-Fi to reconnect...", "⏳".yellow());
                         thread::sleep(Duration::from_secs(10));
                     }
-                    let (retry_status, retry_errors) = self.detect_once(strategies)?;
+                    let (retry_status, retry_errors) = self.detect_once()?;
                     if retry_status == ExecutionStatus::Completed {
                         return Ok(ExecutionStatus::Completed);
                     }
                     if !retry_errors.is_empty() {
-                        return finish_network_not_ready(self.options, &retry_errors);
+                        return finish_network_not_ready(&retry_errors);
                     }
                 }
             }
         }
 
         if !first_errors.is_empty() {
-            finish_network_not_ready(self.options, &first_errors)
+            finish_network_not_ready(&first_errors)
         } else {
-            finish_network_not_ready(self.options, &[])
+            finish_network_not_ready(&[])
         }
     }
 }
 
 pub fn run(options: &Options) -> Result<ExecutionStatus, ReauthfiError> {
     let config = detection_config()?;
-    let cancel_flag = CancelFlag::default();
-    let ctrlc_flag = cancel_flag.clone();
-    ctrlc::set_handler(move || {
-        ctrlc_flag.set();
-    })
-    .map_err(|e| ReauthfiError::CommandFailed(format!("failed to set Ctrl+C handler: {}", e)))?;
 
     let commands = SystemCommandRunner;
     let opener = MacPortalOpener;
 
     println!("{}", "🔍 Detecting Captive Portal...".cyan().bold());
 
-    let strategies: &[StrategyKind] = if options.gateway {
-        &GATEWAY_PRIORITY
-    } else {
-        &STANDARD_PRIORITY
-    };
-
     let detector = Detector {
         config: &config,
         commands: &commands,
         options,
-        cancel_flag: &cancel_flag,
         opener: &opener,
     };
 
-    detector.run(strategies)
+    detector.run()
 }
 
 fn detect_portal(
-    strategies: &[StrategyKind],
     ctx: &DetectionContext,
-    options: &Options,
     opener: &dyn PortalOpener,
 ) -> (ExecutionStatus, Vec<String>) {
     let mut saw_error = false;
     let mut any_success = false;
     let mut all_errors: Vec<String> = Vec::new();
 
-    for &strategy in strategies {
-        let detector: &dyn DetectionStrategy = match strategy {
-            StrategyKind::Gateway => &GatewayDetection,
-            StrategyKind::StandardUrl => &StandardUrlDetection,
-        };
+    let detection_steps: [fn(&DetectionContext) -> DetectionResult; 2] =
+        [detect_standard, detect_gateway];
 
-        match detector.detect(ctx) {
+    for detect in detection_steps {
+        match detect(ctx) {
             DetectionResult::PortalFound(portal_url) => {
-                if !options.verbose {
-                    println!("  {} Portal URL: {}", "→".green().bold(), portal_url);
-                }
+                println!("  {} Portal URL: {}", "→".green().bold(), portal_url);
 
-                if !options.no_open {
-                    println!("{}", "📱 Opening in browser...".cyan().bold());
-                    match opener.open(&portal_url) {
-                        Ok(_) => println!("{}", "✅ Done!".green().bold()),
-                        Err(e) => return (ExecutionStatus::NetworkNotReady, vec![e.to_string()]),
-                    }
+                println!("{}", "📱 Opening in browser...".cyan().bold());
+                match opener.open(&portal_url) {
+                    Ok(_) => println!("{}", "✅ Done!".green().bold()),
+                    Err(e) => return (ExecutionStatus::NetworkNotReady, vec![e.to_string()]),
                 }
                 return (ExecutionStatus::Completed, Vec::new());
             }
             DetectionResult::NetworkIssues(errors) => {
                 saw_error = true;
                 all_errors.extend(errors);
-                continue;
             }
             DetectionResult::NoPortalDetected => {
                 any_success = true;
-                continue;
             }
         }
     }
@@ -460,15 +620,12 @@ fn detect_portal(
     }
 }
 
-fn finish_network_not_ready(
-    options: &Options,
-    errors: &[String],
-) -> Result<ExecutionStatus, ReauthfiError> {
+fn finish_network_not_ready(errors: &[String]) -> Result<ExecutionStatus, ReauthfiError> {
     if !errors.is_empty() {
         let detail = errors.join(", ");
-        print_network_not_ready(options.verbose, Some(&detail));
+        print_network_not_ready(Some(&detail));
     } else {
-        print_network_not_ready(options.verbose, None);
+        print_network_not_ready(None);
     }
     Ok(ExecutionStatus::NetworkNotReady)
 }
@@ -497,6 +654,15 @@ mod tests {
         }
     }
 
+    fn base_target() -> DetectionTarget {
+        DetectionTarget {
+            name: "Test".to_string(),
+            url: "http://example.com".to_string(),
+            expected_status: None,
+            allow_meta_refresh: false,
+        }
+    }
+
     #[test]
     fn gateway_ip_is_parsed_from_route_output() {
         let cfg = dummy_config();
@@ -517,5 +683,36 @@ mod tests {
 
         let err = get_gateway_ip(&cfg, &runner).unwrap_err();
         assert!(matches!(err, ReauthfiError::NotFound));
+    }
+
+    #[test]
+    fn classify_prefers_redirect_location() {
+        let target = base_target();
+        let outcome = classify_parts(&target, 200, Some("http://portal".to_string()), None);
+        assert!(matches!(outcome, Outcome::Portal(url) if url == "http://portal"));
+    }
+
+    #[test]
+    fn classify_matches_expected_status() {
+        let mut target = base_target();
+        target.expected_status = Some(204);
+        let outcome = classify_parts(&target, 204, None, None);
+        assert!(matches!(outcome, Outcome::ExpectedOk));
+    }
+
+    #[test]
+    fn classify_detects_meta_refresh() {
+        let mut target = base_target();
+        target.allow_meta_refresh = true;
+        let body = r#"<html><meta http-equiv="refresh" content="0; url=http://portal"/></html>"#;
+        let outcome = classify_parts(&target, 200, None, Some(body.to_string()));
+        assert!(matches!(outcome, Outcome::Portal(url) if url == "http://portal"));
+    }
+
+    #[test]
+    fn classify_accepts_success_body() {
+        let target = base_target();
+        let outcome = classify_parts(&target, 200, None, Some("Success".to_string()));
+        assert!(matches!(outcome, Outcome::ExpectedOk));
     }
 }

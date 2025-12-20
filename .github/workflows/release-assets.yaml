@@ -1,0 +1,49 @@
+name: release assets
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  upload-macos-tarball:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Verify tag matches crate version
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          CRATE_VERSION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name=="reauthfi") | .version')
+          if [[ "$CRATE_VERSION" != "$VERSION" ]]; then
+            echo "Release tag ${TAG_NAME} does not match crate version ${CRATE_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Build macOS arm64 binary
+        run: cargo build --locked --release --target aarch64-apple-darwin
+
+      - name: Create tarball
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          TAR_NAME="reauthfi-${VERSION}-aarch64-apple-darwin.tar.gz"
+          tar -czf "$TAR_NAME" -C target/aarch64-apple-darwin/release reauthfi
+          echo "tar_name=$TAR_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.tar_name }}
+          tag_name: ${{ github.event.release.tag_name }}
+          overwrite: true

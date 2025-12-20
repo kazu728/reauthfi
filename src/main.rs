@@ -1,35 +1,47 @@
 use std::process::ExitCode;
 
-use clap::Parser;
 use colored::Colorize;
 use reauthfi::{run, ExecutionStatus, Options};
 
-#[derive(Parser)]
-#[command(name = "reauthfi")]
-#[command(about = "macOS Captive Portal auto-detection and opener")]
-#[command(version)]
-struct CliArgs {
-    #[arg(short, long, help = "Enable verbose output")]
-    verbose: bool,
+const HELP: &str = "\
+reauthfi - macOS Captive Portal auto-detection and opener
 
-    #[arg(long, help = "Display portal URL without opening")]
-    no_open: bool,
+Usage:
+  reauthfi [--help] [--version]
 
-    #[arg(long, help = "Prioritize gateway direct check")]
-    gateway: bool,
-
-    #[arg(long, default_value_t = 5, help = "Request timeout in seconds")]
-    timeout: u64,
-}
+Options:
+  -h, --help     Show this help
+  -V, --version  Show version
+";
 
 fn main() -> ExitCode {
-    let args = CliArgs::parse();
-    let options = Options {
-        verbose: args.verbose,
-        no_open: args.no_open,
-        gateway: args.gateway,
-        timeout: args.timeout,
-    };
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if args.next().is_some() {
+        eprintln!("Too many arguments");
+        eprintln!();
+        eprintln!("{HELP}");
+        return ExitCode::FAILURE;
+    }
+    if let Some(arg) = first {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!("{HELP}");
+                return ExitCode::SUCCESS;
+            }
+            "-V" | "--version" => {
+                println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+                return ExitCode::SUCCESS;
+            }
+            _ => {
+                eprintln!("Unknown argument: {arg}");
+                eprintln!();
+                eprintln!("{HELP}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let options = Options::default();
 
     match run(&options) {
         Ok(ExecutionStatus::Completed) => ExitCode::SUCCESS,
